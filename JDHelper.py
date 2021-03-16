@@ -2,6 +2,7 @@ import random
 import sys
 import time
 import requests
+import json
 from utils import log, config, parse_json, session, get_sku_title, send_wechat, ntp_sync, Timer
 from concurrent.futures import ProcessPoolExecutor
 
@@ -12,7 +13,6 @@ class JDHelper(object):
         self.session = session()
         self.purchase_num = 1
         self.sku_id = self.config.get_config('config', 'sku_id')
-        self.sell_url = dict()
         self.order_data = dict()
         self.init_info = dict()
         self.timers = Timer()
@@ -132,199 +132,88 @@ class JDHelper(object):
         log.info('登录成功')
         while True:
             try:
-                self.request_sell_url()
-                self.request_checkout_page()
-                self.submit_order()
+                if not (self.checkout()):
+                    continue
+                if not (self.submit_order()):
+                    continue
+                else:
+                    sys.exit(0)
             except Exception as e:
                 log.info('抢购发生异常，稍后继续执行:', e)
             time.sleep(random.randint(10, 100) / 1000)
 
-    # DESCRIPTION: 请求抢购页面URL：
+    # DESCRIPTION:添加抢购商品到购物车，然后抢购开始后直接进结算页面
     # INPUT:    None
     # OUTPUT:   None
     # AUTHOR:   XuKaikai@2021.03.13
-    def get_sell_url(self):
-        url = 'https://itemko.jd.com/itemShowBtn'
+    def toCart(self):
+        log.info('正在访问商品的抢购连接......')
+        url = 'https://cart.jd.com/gate.action'
         payload = {
-            'callback': 'jQuery{}'.format(random.randint(1000000, 9999999)),
-            'skuId': self.sku_id,
-            'from': 'pc',
-            '_': str(int(time.time() * 1000)),
+            'pcount': self.purchase_num,
+            'ptype': '1',
+            'pid': self.sku_id
         }
         headers = {
-            'Host': 'itemko.jd.com',
+            'Host': 'cart.jd.com',
             'Referer': 'https://item.jd.com/{}.html'.format(self.sku_id),
         }
-        while True:
-            rsp = self.session.get(url=url, headers=headers, params=payload)
-            log.debug(rsp.text)
-            rsp_json = parse_json(rsp.text)
-            if rsp_json.get('url'):
-                # https://divide.jd.com/user_routing?skuId=8654289&sn=c3f4ececd8461f0e4d7267e96a91e0e0&from=pc
-                router_url = 'https:' + rsp_json.get('url')
-                # https://marathon.jd.com/captcha.html?skuId=8654289&sn=c3f4ececd8461f0e4d7267e96a91e0e0&from=pc
-                purchase_url = router_url.replace('divide',
-                                                  'marathon').replace(
-                                                      'user_routing',
-                                                      'captcha.html')
-                log.info("抢购链接获取成功: %s", purchase_url)
-                return purchase_url
-            else:
-                log.info("抢购链接获取失败，稍后自动重试")
-                time.sleep(random.randint(100, 300) / 1000)
-
-    # DESCRIPTION:获取结算页面URL,用于设置cookies
-    # INPUT:    None
-    # OUTPUT:   None
-    # AUTHOR:   XuKaikai@2021.03.13
-    def request_sell_url(self):
-        log.info('用户:{}'.format(self.get_username()))
-        log.info('商品名称:{}'.format(get_sku_title()))
-        self.timers.start()
-        self.sell_url[self.sku_id] = self.get_sell_url()
-        log.info('访问商品的抢购连接...')
-        headers = {
-            'Host': 'marathon.jd.com',
-            'Referer': 'https://item.jd.com/{}.html'.format(self.sku_id),
-        }
-        self.session.get(url=self.sell_url.get(self.sku_id),
-                         headers=headers,
-                         allow_redirects=False)
+        rsp = self.session.get(url=url, params=payload, headers=headers)
+        if rsp.status_code == requests.codes.OK:
+            log.info('成功加入购物')
+        else:
+            log.error('添加购物车失败，状态码：' + str(rsp.status_code))
+        return True
 
     # DESCRIPTION: 访问抢购订单结算页面
     # INPUT:    None
     # OUTPUT:   None
     # AUTHOR:   XuKaikai@2021.03.13
-    def request_checkout_page(self):
-        log.info('访问抢购订单结算页面...')
-        url = 'https://marathon.jd.com/seckill/seckill.action'
-        payload = {
-            'skuId': self.sku_id,
-            'num': self.purchase_num,
-            'rid': int(time.time())
-        }
+    def checkout(self):
+        url = 'https://trade.jd.com/shopping/order/getOrderInfo.action'
         headers = {
-            'Host': 'marathon.jd.com',
-            'Referer': 'https://item.jd.com/{}.html'.format(self.sku_id),
+            'Host': 'trade.jd.com',
+            'Referer': 'https://cart.jd.com/cart_index/',
         }
-        self.session.get(url=url,
-                         params=payload,
-                         headers=headers,
-                         allow_redirects=False)
 
-    # DESCRIPTION:获取秒杀初始化信息(包括地址、发票、token等)
-    # INPUT:    None
-    # RETURN:   初始化信息组成的dict
-    # AUTHOR:   XuKaikai@2021.03.13
-    def _get_init_info(self):
-        log.info('获取秒杀初始化信息...')
-        url = 'https://marathon.jd.com/seckillnew/orderService/pc/init.action'
-        data = {
-            'sku': self.sku_id,
-            'num': self.purchase_num,
-            'isModifyAddress': 'false',
-        }
-        headers = {
-            'Host': 'marathon.jd.com',
-        }
-        rsp = self.session.post(url=url, data=data, headers=headers)
-        log.debug(rsp.text)
-        return parse_json(rsp.text)
-
-    # DESCRIPTION: 生成提交抢购订单所需的请求体参数
-    # INPUT:    None
-    # RETURN:   请求体参数组成的dict
-    # AUTHOR：  XuKaikai@2021.03.13
-    def _get_order_data(self):
-        log.info('生成提交抢购订单所需参数...')
-        # 获取用户秒杀初始化信息
-        self._init_info[self.sku_id] = self._get_init_info()
-        init_info = self._init_info.get(self.sku_id)
-        default_address = init_info['addressList'][0]  # 默认地址dict
-        invoice_info = init_info.get('invoiceInfo', {})  # 默认发票信息dict, 有可能不返回
-        token = init_info['token']
-        data = {
-            'skuId': self.sku_id,
-            'num': self.purchase_num,
-            'addressId': default_address['id'],
-            'yuShou': 'true',
-            'isModifyAddress': 'false',
-            'name': default_address['name'],
-            'provinceId': default_address['provinceId'],
-            'cityId': default_address['cityId'],
-            'countyId': default_address['countyId'],
-            'townId': default_address['townId'],
-            'addressDetail': default_address['addressDetail'],
-            'mobile': default_address['mobile'],
-            'mobileKey': default_address['mobileKey'],
-            'email': default_address.get('email', ''),
-            'postCode': '',
-            'invoiceTitle': invoice_info.get('invoiceTitle', -1),
-            'invoiceCompanyName': '',
-            'invoiceContent': invoice_info.get('invoiceContentType', 1),
-            'invoiceTaxpayerNO': '',
-            'invoiceEmail': '',
-            'invoicePhone': invoice_info.get('invoicePhone', ''),
-            'invoicePhoneKey': invoice_info.get('invoicePhoneKey', ''),
-            'invoice': 'true' if invoice_info else 'false',
-            'password': '',
-            'codTimeType': 3,
-            'paymentType': 4,
-            'areaCode': '',
-            'overseas': 0,
-            'phone': '',
-            'eid': config.get_config('config', 'eid'),
-            'fp': config.get_config('config', 'fp'),
-            'token': token,
-            'pru': ''
-        }
-        return data
+        rsp = self.session.get(url=url, headers=headers)
+        if rsp.status_code == requests.codes.OK:
+            log.info('去结算')
+            return True
+        else:
+            log.error('访问订单结算页面失败，状态码：' + str(rsp.status_code) + ' 正在重试...')
+            return False
 
     # DESCRIPTION: 提交抢购订单
     # INPUT：   None
     # OUTPUT:   抢购结果
     # AUTHOR:   XuKaikai@03.13
     def submit_order(self):
-        url = 'https://marathon.jd.com/seckillnew/orderService/pc/submitOrder.action'
-        payload = {
-            'skuId': self.sku_id,
-        }
-        self.order_data[self.sku_id] = self._get_order_data()
-        log.info('提交抢购订单...')
+        url = 'https://trade.jd.com/shopping/order/submitOrder.action?='
+        payload = {'presaleStockSign': '1'}
         headers = {
-            'Host':
-            'marathon.jd.com',
+            'Host': 'trade.jd.com',
             'Referer':
-            'https://marathon.jd.com/seckill/seckill.action?skuId={0}&num={1}&rid={2}'
-            .format(self.sku_id, self.purchase_num, int(time.time())),
+            'https://trade.jd.com/shopping/order/getOrderInfo.action',
         }
-        rsp = self.session.post(url=url,
-                                params=payload,
-                                data=self.order_data.get(self.sku_id),
-                                headers=headers)
-        log.debug(rsp.text)
-        rsp_json = parse_json(rsp.text)
-        # 返回信息
-        # 抢购失败：
-        # {'errorMessage': '很遗憾没有抢到，再接再厉哦。', 'orderId': 0, 'resultCode': 60074, 'skuId': 0, 'success': False}
-        # {'errorMessage': '抱歉，您提交过快，请稍后再提交订单！', 'orderId': 0, 'resultCode': 60017, 'skuId': 0, 'success': False}
-        # {'errorMessage': '系统正在开小差，请重试~~', 'orderId': 0, 'resultCode': 90013, 'skuId': 0, 'success': False}
-        # 抢购成功：
-        # {"appUrl":"xxxxx","orderId":820227xxxxx,"pcUrl":"xxxxx","resultCode":0,"skuId":0,"success":true,"totalMoney":"xxxxx"}
+        rsp = self.session.get(url=url, params=payload, headers=headers)
+        if rsp.status_code == requests.codes.OK:
+            log.info('正在提交订单...')
+        else:
+            log.error('订单提交失败，状态码：' + str(rsp.status_code) + ' 正在重试...')
+
+        try:
+            rsp_json = json.loads(rsp.text)
+        except Exception as e:
+            log.error('提交订单失败，请稍后重试')
+            return False
         if rsp_json.get('success'):
             order_id = rsp_json.get('orderId')
-            total_money = rsp_json.get('totalMoney')
-            pay_url = 'https:' + rsp_json.get('pcUrl')
-            log.info('抢购成功，订单号:{}, 总价:{}, 电脑端付款链接:{}'.format(
-                order_id, total_money, pay_url))
+            log.info('抢购成功，订单号:{},'.format(order_id))
             if config.get_config('messenger', 'enable') == 'true':
-                success_message = "抢购成功，订单号:{}, 总价:{}, 电脑端付款链接:{}".format(
-                    order_id, total_money, pay_url)
+                success_message = "抢购成功，订单号:{}, 请尽快到PC端进行付款".format(order_id)
                 send_wechat(success_message)
             return True
         else:
             log.info('抢购失败，返回信息:{}'.format(rsp_json))
-            if config.get_config('messenger', 'enable') == 'true':
-                error_message = '抢购失败，返回信息:{}'.format(rsp_json)
-                send_wechat(error_message)
             return False

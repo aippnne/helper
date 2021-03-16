@@ -258,7 +258,7 @@ def ntp_sync():
 #   包裹的json串，所以需要单独把json串部分截取出来
 # INPUT:
 #   s:  服务器返回的字符串
-# OUTPUT: 经过json格式化的字符串
+# OUTPUT: 经过json格式化的字符串,是字典形式的
 # AUTHOR: XuKaikai@2021.03.12
 def parse_json(s: str) -> str:
     start = s.find('{')
